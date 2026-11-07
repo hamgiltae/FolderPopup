@@ -523,6 +523,14 @@ class FolderPopup(QWidget):
     def open_settings(self):
         self._dialog_open = True
         dlg = SettingsDialog(self, self.s, self.folder.name)
+        # 팝업이 '항상 위' 창이라 설정 창이 가려질 수 있으므로 같이 맨 위로 올린다
+        dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        dlg.adjustSize()
+        c = self.frameGeometry().center()
+        dlg.move(c.x() - dlg.width() // 2, c.y() - dlg.height() // 2)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
         accepted = dlg.exec()
         self._dialog_open = False
         self._last_outside = None
