@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    QEasingCurve, QFileInfo, QPropertyAnimation, QSize, Qt, QTimer,
+    QEasingCurve, QFileInfo, QPoint, QPropertyAnimation, QSize, Qt, QTimer,
 )
 from PyQt6.QtGui import QColor, QCursor, QPainter, QPainterPath
 from PyQt6.QtWidgets import (
@@ -50,6 +50,7 @@ DEFAULTS = {
     "columns": 4,       # 한 줄 아이콘 수 (= 팝업 가로 크기)
     "bg": "#26262a",    # 배경색
     "opacity": 94,      # 배경 불투명도(%)
+    "pos": None,        # 마지막으로 옮겨 둔 창 위치 [x, y]
 }
 
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "FolderPopup"
@@ -81,6 +82,10 @@ def load_settings(folder: Path) -> dict:
     s["opacity"] = max(40, min(100, int(s["opacity"])))
     if not QColor(str(s["bg"])).isValid():
         s["bg"] = DEFAULTS["bg"]
+    p = s.get("pos")
+    if not (isinstance(p, (list, tuple)) and len(p) == 2
+            and all(isinstance(v, int) for v in p)):
+        s["pos"] = None
     return s
 
 
@@ -167,6 +172,9 @@ class Item(QWidget):
         self._hover = False
         self.update()
 
+    def mousePressEvent(self, e):
+        e.accept()   # 클릭은 아이콘이 처리 (창 이동은 빈 곳에서만)
+
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
             self.on_open(self.path)
@@ -205,6 +213,9 @@ class GearButton(QLabel):
     def leaveEvent(self, e):
         self._style(False)
 
+    def mousePressEvent(self, e):
+        e.accept()
+
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
             self.on_click()
@@ -242,6 +253,7 @@ class SettingsDialog(QDialog):
         self.setStyleSheet(DIALOG_QSS)
         self.default_title = default_title
         self.bg = s["bg"]
+        self.reset_pos = False
 
         self.name = QLineEdit(s["title"])
         self.name.setPlaceholderText(default_title)
@@ -342,6 +354,7 @@ class SettingsDialog(QDialog):
         self.cols.setValue(DEFAULTS["columns"])
         self.opacity.setValue(DEFAULTS["opacity"])
         self._set_bg(DEFAULTS["bg"])
+        self.reset_pos = True   # 저장하면 위치도 기본(화면 가운데)으로
 
     def values(self) -> dict:
         title = self.name.text().strip()
@@ -367,6 +380,7 @@ class FolderPopup(QWidget):
         self._content = None
         self._was_down = False
         self._last_outside = None   # (시각, 위치)
+        self._drag_offset = None    # 창 끌기용
 
         # Popup 플래그를 쓰면 바깥을 '한 번'만 눌러도 닫히므로,
         # 일반 창(Tool)으로 만들고 바깥 클릭은 직접 감지한다.
@@ -461,6 +475,7 @@ class FolderPopup(QWidget):
         link.setAlignment(Qt.AlignmentFlag.AlignCenter)
         link.setCursor(Qt.CursorShape.PointingHandCursor)
         link.setStyleSheet(f"color:{th.sub}; font-size:11px; background:transparent;")
+        link.mousePressEvent = lambda e: e.accept()
         link.mouseReleaseEvent = lambda e: self.open_in_explorer()
         lay.addWidget(link)
 
@@ -513,10 +528,29 @@ class FolderPopup(QWidget):
         self._last_outside = None
         self._was_down = self._pressed()
         if accepted:
-            self.s = dlg.values()
+            new = dict(self.s)
+            new.update(dlg.values())          # 위치(pos)는 유지
+            if dlg.reset_pos:
+                new["pos"] = None
+            self.s = new
             save_settings(self.folder, self.s)
             self.rebuild()
         self.activateWindow()
+
+    # -- 창 끌어서 옮기기 (빈 곳/제목 줄을 잡고 끈다)
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, e):
+        if self._drag_offset is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            self.move(e.globalPosition().toPoint() - self._drag_offset)
+
+    def mouseReleaseEvent(self, e):
+        if self._drag_offset is not None:
+            self._drag_offset = None
+            self.s["pos"] = [self.x(), self.y()]
+            save_settings(self.folder, self.s)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Escape:
@@ -576,9 +610,29 @@ class FolderPopup(QWidget):
         y = max(area.top() + 8, min(y, area.bottom() - self.height() - 8))
         self.move(x, y)
 
+    def _saved_pos(self):
+        """저장된 위치가 현재 연결된 화면 안이면 그 위치를 돌려준다."""
+        p = self.s.get("pos")
+        if not p:
+            return None
+        x, y = p
+        screen = QApplication.screenAt(QPoint(x + 40, y + 40))
+        if screen is None:
+            return None
+        a = screen.availableGeometry()
+        x = max(a.left(), min(x, a.right() - self.width()))
+        y = max(a.top(), min(y, a.bottom() - self.height()))
+        return x, y
+
     def show_animated(self):
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         area = screen.availableGeometry()
+        saved = self._saved_pos()
+        if saved:
+            x, y = saved
+            self.move(x, y)
+            self._finish_show()
+            return
         if self.at_cursor:
             pos = QCursor.pos()
             x = pos.x() - self.width() // 2
@@ -589,7 +643,9 @@ class FolderPopup(QWidget):
             x = area.center().x() - self.width() // 2
             y = area.center().y() - self.height() // 2
         self._move_clamped(x, y)
+        self._finish_show()
 
+    def _finish_show(self):
         self.setWindowOpacity(0.0)
         self.show()
         self.activateWindow()
