@@ -390,6 +390,7 @@ class FolderPopup(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, True)
         self.setWindowTitle(folder.name)
 
         self.outer = QVBoxLayout(self)
@@ -567,6 +568,8 @@ class FolderPopup(QWidget):
     def closeEvent(self, e):
         self.timer.stop()
         super().closeEvent(e)
+        # Tool 창은 닫아도 프로그램이 자동 종료되지 않으므로 직접 종료한다
+        QApplication.quit()
 
     # -- 바깥 더블클릭 감지
     def _pressed(self) -> bool:
